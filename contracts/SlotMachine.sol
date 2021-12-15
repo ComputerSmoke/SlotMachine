@@ -90,7 +90,8 @@ contract SlotMachine is ERC1155,Ownable,VRFConsumerBase {
         internal override {
         require(state == SLOT_STATE.SPINNING, "Slot machine is not spinning.");
         require(_randomness > 0, "random-not-found");
-        line = _randomness;
+        line = modLine(_randomness);
+
         emit SpinCompletion(line);
         uint256 winnings = paylines[line];
         if(winnings == 0) return;
@@ -98,5 +99,14 @@ contract SlotMachine is ERC1155,Ownable,VRFConsumerBase {
         safeTransferFrom(address(this), spinner, TICKET, winnings, "");
         // Reset
         state = SLOT_STATE.STOPPED;
+    }
+    //Convert random uint256 to an encoding of reel states not exceeding reelSize
+    function modLine(uint256 _randomness) internal pure returns (uint256) {
+        uint256 result = 0;
+        for(uint i = 0; i < reelCount; i++) {
+            uint256 reelValue = uint256(((_randomness >> (248 - i*8)) & 0xFF) % reelSize);
+            result = result | uint256(reelValue << (248-i*8));
+        }
+        return result;
     }
 }
