@@ -1,15 +1,12 @@
 //SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.0;
 
-import "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
+import "@openzeppelin/contracts/token/ERC1155/IERC1155.sol";
 import "@chainlink/contracts/src/v0.6/interfaces/AggregatorV3Interface.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "../interfaces/ISlotMachine.sol";
 
-contract SlotMachine is ISlotMachine,ERC1155,Ownable,VRFConsumerBase {
-    using SafeERC20 for IERC20;
+contract SlotMachine is ISlotMachine,Ownable,VRFConsumerBase {
     //Ticket to use for spin/rewards
     uint256 public constant TICKET = 0;
     //Characteristics of machine
@@ -17,9 +14,8 @@ contract SlotMachine is ISlotMachine,ERC1155,Ownable,VRFConsumerBase {
     uint8 reelSize;
     uint256 minBetAmount;
     //Ticket economics
-    uint256 ticketCost;
-    uint256 mintBatchAmount;
-    IERC20 backingToken;
+    uint256 ticketId;
+    IERC1155 tickets;
     uint256 maxPayoutAmount;
     //Current positions of reels
     uint256 line;
@@ -51,29 +47,22 @@ contract SlotMachine is ISlotMachine,ERC1155,Ownable,VRFConsumerBase {
         uint256[] memory _paylines, //Sequences that pay out (uint256 encoding)
         uint256[] memory _paylineValues,//Corresponding amount to pay out for each sequence at corresponding index
         //Economics
-        uint256 _initialSupply, //Initial supply of tickets in the machine
         uint256 _minBetAmount, //Minimum cost to play
-        address _backingToken, //The token with which to purchase tickets
-        uint256 _ticketCost, //Cost of purchasing a ticket
-        uint256 _mintBatchAmount,//How many to mint if machine runs out of tickets
         //necessary for getting VRFs from Chainlink
         address _vrfCoordinator,
         address _link,
         uint256 _fee,
         bytes32 _keyhash,
-        //Metadata
-        string _URI
-    ) public VRFConsumerBase(_vrfCoordinator, _link) ERC1155(_URI) {
+        //ID of the ticket in ERC1155 ticket contract
+        uint256 _ticketId,
+        address _ticketContract
+    ) public VRFConsumerBase(_vrfCoordinator, _link) {
         require(reelCount <= 32, "Too many reels. Max: 32");
         require(_paylines.length == _paylineValues.length, "A different number of paylines and values were provided.");
-        setOwner(msg.sender);
+
         reelCount = _reelCount;
         reelSize = _reelSize;
-        spinCost = _spinCost;
-        backingToken = IERC20(_backingToken);
         minBetAmount = _minBetAmount;
-        ticketCost = _ticketCost;
-        mintBatchAmount = _mintBatchAmount;
         for(uint i = 0; i < _paylines.length; i++) {
             paylines[_paylines[i]] = _paylineValues[i];
             paylineArray[i] = _paylines[i];
@@ -83,6 +72,9 @@ contract SlotMachine is ISlotMachine,ERC1155,Ownable,VRFConsumerBase {
         state = SLOT_STATE.STOPPED;
         fee = _fee;
         keyhash = _keyhash;
+
+        ticketId = _ticketId;
+        tickets = _ticketContract;
         _mint(address(this), TICKET, _initialSupply, "");
     }
     //Used to purchase tickets from machine
