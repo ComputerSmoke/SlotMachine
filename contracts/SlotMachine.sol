@@ -7,8 +7,6 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "../interfaces/ISlotMachine.sol";
 
 contract SlotMachine is ISlotMachine,Ownable,VRFConsumerBase {
-    //Ticket to use for spin/rewards
-    uint256 public constant TICKET = 0;
     //Characteristics of machine
     uint8 reelCount;
     uint8 reelSize;
@@ -16,6 +14,8 @@ contract SlotMachine is ISlotMachine,Ownable,VRFConsumerBase {
     //Ticket economics
     uint256 ticketId;
     IERC1155 tickets;
+    //ID of machine in tickets contract to verify ownership of machine
+    uint256 machineId;
     uint256 maxPayoutAmount;
     //Current positions of reels
     uint256 line;
@@ -54,8 +54,10 @@ contract SlotMachine is ISlotMachine,Ownable,VRFConsumerBase {
         uint256 _fee,
         bytes32 _keyhash,
         //ID of the ticket in ERC1155 ticket contract
-        uint256 _ticketId,
-        address _ticketContract
+        uint128 _ticketId,
+        address _ticketContract,
+        //ID of the machine in the ERC1155 ticket contract (For verifying ownership)
+        uint128 _machineId
     ) public VRFConsumerBase(_vrfCoordinator, _link) {
         require(reelCount <= 32, "Too many reels. Max: 32");
         require(_paylines.length == _paylineValues.length, "A different number of paylines and values were provided.");
@@ -73,9 +75,9 @@ contract SlotMachine is ISlotMachine,Ownable,VRFConsumerBase {
         fee = _fee;
         keyhash = _keyhash;
 
-        ticketId = _ticketId;
+        ticketId = uint256(_ticketId);
+        machineId = uint256(_machineId) << 128;
         tickets = _ticketContract;
-        _mint(address(this), TICKET, _initialSupply, "");
     }
     //Used to purchase tickets from machine
     function buyTickets(uint256 _amount) external {
@@ -139,9 +141,6 @@ contract SlotMachine is ISlotMachine,Ownable,VRFConsumerBase {
     function getReelSize() external view returns (uint8) {
         return reelSize;
     }
-    function getTicketCost() external view returns (uint256) {
-        return ticketCost;
-    }
     function getLine() external view returns (uint256) {
         return line;
     }
@@ -154,6 +153,15 @@ contract SlotMachine is ISlotMachine,Ownable,VRFConsumerBase {
             payoutArray[i] = paylines[paylineArray[i]];
         }
         return (paylineArray, payoutArray);
+    }
+    function getTicketId() external view returns(uint128) {
+        return uint128(ticketId);
+    }
+    function getTicketContract() external view returns(address) {
+        return address(tickets);
+    }
+    function getMachineId() external view returns(uint128) {
+        return uint128(machineId >> 128);
     }
 
     //Math utils for other contracts

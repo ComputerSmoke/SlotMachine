@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.0;
 
 interface ISlotMachine {
     //Interactions
-    /**
-    Buy tickets to play with.
-    */
-    function buyTickets(uint256 amount) external;
     /**
     Spin the slot machine
     */
@@ -24,10 +21,6 @@ interface ISlotMachine {
     Get the size of the reels
     */
     function getReelSize() external view returns (uint8);
-    /**
-    Get the cost of a ticket (in backing token)
-    */
-    function getTicketCost() external view returns (uint256);
     /**
     Get the encoding of the current reel states.
     */
