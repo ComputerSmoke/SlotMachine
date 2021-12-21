@@ -1,2 +1,1 @@
-ERC1155 smart contract slot machine.
-
+ERC1155 smart contract slot machine. This code is a work in progress and has yet to undergo testing. Do not deploy these contracts yet.

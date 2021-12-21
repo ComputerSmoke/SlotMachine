@@ -5,15 +5,23 @@ import "@openzeppelin/contracts/token/ERC1155/IERC1155.sol";
 import "@chainlink/contracts/src/v0.6/interfaces/AggregatorV3Interface.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "../interfaces/ISlotMachine.sol";
+import "@openzeppelin/contracts/token/ERC1155/utils/ERC1155Holder.sol";
 
-contract SlotMachine is ISlotMachine,Ownable,VRFConsumerBase {
+contract SlotMachine is ISlotMachine,Ownable,VRFConsumerBase,ERC1155Holder {
     //Characteristics of machine
-    uint8 reelCount;
-    uint8 reelSize;
-    uint256 minBetAmount;
+    uint8 public reelCount;
+    uint8 public reelSize;
+    uint256 public minBetAmount;
     //Ticket economics
     uint256 ticketId;
     IERC1155 tickets;
+    //Track the amount owed to players. They can collect this, or use it to spin for rewards.
+    mapping(address => uint256) debts;
+    uint256 totalDebt;
+    //Wheel spin payout economics
+    ERC20 wheelToken;
+    uint256[] wheelValues;
+    uint256 maxWheelPayout;
     //ID of machine in tickets contract to verify ownership of machine
     uint256 machineId;
     uint256 maxPayoutAmount;
@@ -25,15 +33,18 @@ contract SlotMachine is ISlotMachine,Ownable,VRFConsumerBase {
     //State of machine
     enum SLOT_STATE {
         STOPPED,
-        SPINNING
+        SPINNING,
+        WHEEL
     }
     SLOT_STATE public state;
     //Emitted when we want a new VRF
     event RequestedRandomness(bytes32 requestId);
-    //Emitted when spin completes
+    //Emitted when spins complete
     event SpinCompletion(uint256 line);
-    //Emitted when tokens are purchased from the machine
-    event TicketsPurchased(uint256 amountPurchased);
+    event WheelCompletion(uint256 wheelState);
+    //Emittied when spins start
+    event SpinStart(uint256 betAmount);
+    event WheelStart(uint256 betAmount);
     //Address that spun the machine
     address spinner;
     //Amount bet on spin
@@ -46,6 +57,7 @@ contract SlotMachine is ISlotMachine,Ownable,VRFConsumerBase {
         uint8 _reelSize, //Size of each reel
         uint256[] memory _paylines, //Sequences that pay out (uint256 encoding)
         uint256[] memory _paylineValues,//Corresponding amount to pay out for each sequence at corresponding index
+        uint256[] memory _wheelValues,//Spin wheel payout amounts
         //Economics
         uint256 _minBetAmount, //Minimum cost to play
         //necessary for getting VRFs from Chainlink
@@ -56,6 +68,8 @@ contract SlotMachine is ISlotMachine,Ownable,VRFConsumerBase {
         //ID of the ticket in ERC1155 ticket contract
         uint128 _ticketId,
         address _ticketContract,
+        //address of the ERC20 token used for wheel spin payouts.
+        address _wheelTokenAddress,
         //ID of the machine in the ERC1155 ticket contract (For verifying ownership)
         uint128 _machineId
     ) public VRFConsumerBase(_vrfCoordinator, _link) {
@@ -70,6 +84,13 @@ contract SlotMachine is ISlotMachine,Ownable,VRFConsumerBase {
             paylineArray[i] = _paylines[i];
             if(_paylineValues[i] > maxPayoutAmount) maxPayoutAmount = _paylineValues[i];
         }
+        maxWheelPayout = 0;
+        for(uint i = 0; i < _wheelValues.length; i++) {
+            uint256 value = _wheelValues[i];
+            wheelValues.push(value);
+            if(maxWheelPayout < value) maxWheelPayout = value;
+        }
+        wheelToken = IERC20(wheelTokenAddress);
 
         state = SLOT_STATE.STOPPED;
         fee = _fee;
@@ -79,12 +100,6 @@ contract SlotMachine is ISlotMachine,Ownable,VRFConsumerBase {
         machineId = uint256(_machineId) << 128;
         tickets = _ticketContract;
     }
-    //Used to purchase tickets from machine
-    function buyTickets(uint256 _amount) external {
-        uint256 cost = _amount * ticketCost;
-        backingToken.safeTransferFrom(msg.sender, address(this), cost);
-        payout(msg.sender, _amount);
-    }
     //Transfer tickets to recipient, minting new ones if necessary
     function payout(address _recipient, uint256 _amount) internal {
         require(_amount < mintBatchAmount, "Excessive transfer amount.");
@@ -93,33 +108,74 @@ contract SlotMachine is ISlotMachine,Ownable,VRFConsumerBase {
     }
     
     //Spin function called by user
-    function spin(uint256 _betAmount) external {
+    function spinMachine(uint256 _betAmount) external {
         require(_betAmount >= minBetAmount, "Insufficient bet amount.");
+        //Ensure machine is not committing to pay out more than it has.
+        uint256 jackpotSize = tickets.balanceOf(address(this), ticketId);
         require(
-            _betAmount < uint256(0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff) / maxPayoutAmount, 
-            "Bet amount is too large."
+            _betAmount * maxPayoutAmount <= jackpotSize-totalDebt, 
+            "Bet amount is too large for current ticket jackpot."
+        );
+        require(
+            _betAmount * maxPayoutAmount < wheelTokenholdings / maxWheelPayout,
+            "Wheel does not have enough token backing to pay out potential win."
         );
         require(state == SLOT_STATE.STOPPED, "Slot machine is currently spinning.");
-        safeTransferFrom(msg.sender, address(this), TICKET, _betAmount, "");
+        tickets.safeTransferFrom(msg.sender, address(this), ticketId, _betAmount, "");
         betAmount = _betAmount;
         spinner = msg.sender;
         state = SLOT_STATE.SPINNING;
         bytes32 requestId = requestRandomness(keyhash, fee);
         emit RequestedRandomness(requestId);
+        emit SpinStart(_betAmount);
     }
-    //Called when randomness is filled - ie. slot machine stops spinning and pays out
+    //Spin the wheel with pending ticket rewards
+    function spinWheel() external {
+        require(debts[msg.sender] > 0, "You do not have any pending ticket rewards to spin with.");
+        //Ensure machine is not committing to pay more than it has
+        uint256 wheelTokenHoldings = wheelToken.balanceOf(address(this));
+        //Interface should warn people if spinning the machine could give them more rewards than the machine can afford.
+        require(
+            debts[msg.sender] * maxWheelPayout <= wheelTokenHoldings, 
+            "Machine does not have enough token rewards for you to spin the wheel at this time."
+        );
+        state = SLOT_STATE.WHEEL;
+        bytes32 requestId = requestRandomness(keyhash, fee);
+        emit RequestedRandomness(requestId);
+        emit WheelStart(debts[msg.sender]);
+    }
+    //Called when randomness is filled - ie. slot machine or wheel stops spinning and pays out
     function fulfillRandomness(bytes32 _requestId, uint256 _randomness)
         internal override {
-        require(state == SLOT_STATE.SPINNING, "Slot machine is not spinning.");
         require(_randomness > 0, "random-not-found");
+        if(state == SLOT_STATE.SPINNING) finishSpin(_randomness);
+        else if(state == SLOT_STATE.WHEEL) finishWheel(_randomness);
+        state = SLOT_STATE.STOPPED;
+    }
+    //Slot machine stops spinning and pays out
+    function finishSpin(uint256 _randomness) internal {
         line = modLine(_randomness);
 
-        emit SpinCompletion(line);
         uint256 winnings = paylines[line]*betAmount;
         if(winnings == 0) return;
         
-        payout(spinner, winnings);
-        state = SLOT_STATE.STOPPED;
+        creditTab(spinner, winnings);
+        emit SpinCompletion(line);
+    }
+    //Add ticket credits to a user's tab. This can be withdrawn with withdrawTickets, or used to spin the wheel.
+    function creditTab(address _user, uint256 amount) internal {
+        debts[_user] += amount;
+        totalDebt += amount;
+    }
+    //Wheel stops spinning and pays out
+    function finishWheel(uint256 _randomness) internal {
+        uint256 wheelState = _randomness % wheelValues.length;
+        uint256 payoutAmount = wheelValues[wheelState]*debts[spinner];
+        totalDebt -= debts[spinner];
+        debts[spinner] = 0;
+        if(payoutAmount == 0) return;
+        wheelToken.safeTransfer(spinner, payoutAmount);
+        emit WheelCompletion(payoutAmount);
     }
     //Convert random uint256 to an encoding of reel states not exceeding reelSize
     function modLine(uint256 _randomness) internal pure returns (uint256) {
@@ -147,12 +203,11 @@ contract SlotMachine is ISlotMachine,Ownable,VRFConsumerBase {
     function getState() external view returns(uint8) {
         return state;
     }
-    function getLines() external view returns(uint256[] memory, uint256[] memory) {
-        uint256[] memory payoutArray = new uint256(paylineArray.length);
-        for(uint i = 0; i < paylineArray.length; i++) {
-            payoutArray[i] = paylines[paylineArray[i]];
-        }
-        return (paylineArray, payoutArray);
+    function getPaylines() external view returns(uint256[] memory) {
+        return paylineArray;
+    }
+    function getPaylineValue(uint256 _payline) external view returns(uint256) {
+        return paylines[_payline];
     }
     function getTicketId() external view returns(uint128) {
         return uint128(ticketId);
